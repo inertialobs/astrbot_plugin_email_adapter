@@ -114,7 +114,7 @@ AstrBot Email 平台适配器（IMAP 收信 / SMTP 发信），支持多个 Bot 
 - 回复自动写入 `In-Reply-To` / `References` 头，在 Gmail、Outlook 等客户端中与原邮件归入同一会话。
 - 拒收：`block_from` 命中发件人即跳过（优先于收件人过滤），记 debug 日志；支持精确地址与正则（`re.fullmatch`，大小写不敏感）。
 - 收件人过滤：`allowed_to` 为空时不限制；否则匹配 `To` / `Delivered-To` / `X-Original-To`（大小写不敏感），不匹配的邮件忽略并记 debug 日志。
-- 每日限额分两级、按实例隔离：`daily_limit`（每个发件人）与 `daily_total_limit`（本实例总数，`0` 不限）。任一超限即**在收信阶段跳过该邮件**（不产生事件、不调用 LLM、不回复，仅 debug 日志）；计数在邮件**发送成功后**才消耗，发送失败不占用额度，并持久化到 `data/email_limit_<id>.json`，跨日自动重置。
+- 每日限额分两级、按实例隔离：`daily_limit`（每个发件人）与 `daily_total_limit`（本实例总数，`0` 不限）。任一超限即**在收信阶段跳过该邮件**（不产生事件、不调用 LLM、不回复，仅 debug 日志）；计数在邮件**发送成功后**才消耗，发送失败不占用额度，并持久化到 `data/plugin_data/astrbot_plugin_email_adapter/email_limit_<id>.json`，跨日自动重置。
 - `silent_on_llm_error` 开启时，默认 LLM 请求失败**不回错误信息**（只记 debug 日志）；通过 `on_llm_request`/`on_llm_response` 钩子追踪请求生命周期，并结合核心的错误标记判断。
 - 每个实例独立协程与状态，单个实例异常只记日志，不影响其他实例。
 

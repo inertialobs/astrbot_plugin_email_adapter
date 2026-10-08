@@ -12,10 +12,9 @@ from email.parser import BytesParser
 from email.policy import default as email_policy_default
 from email.utils import formataddr, getaddresses, parseaddr
 from html.parser import HTMLParser
-from pathlib import Path
 from typing import Any
 
-from astrbot import logger
+from astrbot.api import logger
 from astrbot.api.event import MessageChain
 from astrbot.api.message_components import Plain
 from astrbot.api.platform import (
@@ -26,8 +25,8 @@ from astrbot.api.platform import (
     PlatformMetadata,
     register_platform_adapter,
 )
+from astrbot.api.star import StarTools
 from astrbot.core.platform.astr_message_event import MessageSesion
-from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .email_event import EmailMessageEvent
 
@@ -703,7 +702,10 @@ class EmailPlatformAdapter(Platform):
         self._quota_total = 0
         self._quota_lock = asyncio.Lock()
         safe_id = re.sub(r"[^0-9A-Za-z._-]", "_", self.instance_id) or "email"
-        self._limit_file = Path(get_astrbot_data_path()) / f"email_limit_{safe_id}.json"
+        self._limit_file = (
+            StarTools.get_data_dir("astrbot_plugin_email_adapter")
+            / f"email_limit_{safe_id}.json"
+        )
         self._load_quota()
 
         self._shutdown_event = asyncio.Event()

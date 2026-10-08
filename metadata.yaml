@@ -6,7 +6,7 @@ desc: |
   收发均支持 SSL / STARTTLS / 明文三种加密方式与可选的证书校验，
   适配 Gmail、Outlook、QQ 邮箱、163、自建邮件服务器及各类事务邮件服务。
   回复自动带上会话线程头，可在邮件客户端中正确归组。
-version: 0.1.0
+version: 0.1.1
 author: inertialobs
 repo: https://github.com/inertialobs/astrbot_plugin_email_adapter
 astrbot_version: ">=4.16.0,<5"
