@@ -1,0 +1,16 @@
+name: astrbot_plugin_email_adapter
+display_name: Email 适配器
+short_desc: 原生 Email 平台适配器（IMAP 收信 / SMTP 发信），支持多实例。
+desc: |
+  为 AstrBot 提供原生 Email 平台支持：通过 IMAP 轮询收信、SMTP 发信，
+  支持多个 Bot 实例共享同一个邮箱账户但使用不同的文件夹与发件地址。
+  仅依赖 Python 标准库，无需 Node.js / OneBots。
+version: 0.0.6
+author: inertialobs
+repo: https://github.com/inertialobs/astrbot_plugin_email_adapter
+astrbot_version: ">=4.16.0,<5"
+tags:
+  - email
+  - imap
+  - smtp
+  - platform-adapter
