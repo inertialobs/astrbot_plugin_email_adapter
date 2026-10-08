@@ -46,7 +46,7 @@ class EmailMessageEvent(AstrMessageEvent):
             )
             return
 
-        if not await self.adapter.try_consume(recipient):
+        if await self.adapter.is_over_quota(recipient):
             logger.debug(
                 "[email:%s] Daily quota reached, silently dropping reply to %s.",
                 self.adapter.instance_id,
@@ -57,7 +57,17 @@ class EmailMessageEvent(AstrMessageEvent):
         subject = self.adapter.build_reply_subject(
             str(self.get_extra("subject", "") or ""),
         )
-        await self.adapter.send_mail(recipient, subject, text)
+        message_id = str(self.get_extra("message_id", "") or "")
+        references = str(self.get_extra("references", "") or "")
+        thread_refs = f"{references} {message_id}".strip()
+        if await self.adapter.send_mail(
+            recipient,
+            subject,
+            text,
+            in_reply_to=message_id,
+            references=thread_refs,
+        ):
+            await self.adapter.try_consume(recipient)
         await super().send(message)
 
     def _is_llm_failure(self) -> bool:
