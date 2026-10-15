@@ -4,6 +4,7 @@ import imaplib
 import json
 import re
 import smtplib
+import socket
 import ssl
 from collections import OrderedDict
 from datetime import datetime
@@ -29,6 +30,7 @@ from astrbot.api.star import StarTools
 from astrbot.core.platform.astr_message_event import MessageSesion
 
 from .email_event import EmailMessageEvent
+from .imap_failover import _FailoverIMAP4, _FailoverIMAP4SSL
 
 _REGEX_META = re.compile(r"[\\^$*?{}\[\]|()]")
 """Characters that mark a block_from entry as a regular expression."""
@@ -51,6 +53,7 @@ EMAIL_DEFAULT_CONFIG = {
     "smtp_pass": "",
     "smtp_timeout": 30,
     "tls_verify": True,
+    "tls_max_version": "auto",
     "from_addr": "",
     "from_name": "",
     "allowed_to": [],
@@ -154,6 +157,13 @@ EMAIL_CONFIG_METADATA = {
         "description": "校验 TLS 证书",
         "type": "bool",
         "hint": "默认开启。仅在自建服务使用自签名证书时关闭，存在中间人风险。",
+    },
+    "tls_max_version": {
+        "description": "最高 TLS 版本",
+        "type": "string",
+        "options": ["auto", "1.2", "1.3"],
+        "labels": ["自动", "TLS 1.2", "TLS 1.3"],
+        "hint": "默认自动（不限制）。仅在确有必要时手动限定 TLS 最高版本，例如某些老服务只兼容 1.2。与证书校验无关。",
     },
     "from_addr": {
         "description": "发件地址",
@@ -271,6 +281,11 @@ EMAIL_I18N_RESOURCES = {
             "description": "校验 TLS 证书",
             "hint": "默认开启。仅在自建服务使用自签名证书时关闭，存在中间人风险。",
         },
+        "tls_max_version": {
+            "description": "最高 TLS 版本",
+            "labels": ["自动", "TLS 1.2", "TLS 1.3"],
+            "hint": "默认自动（不限制）。仅在确有必要时手动限定 TLS 最高版本，例如某些老服务只兼容 1.2。与证书校验无关。",
+        },
         "from_addr": {
             "description": "发件地址",
             "hint": "本实例的 From 地址，例如 bot1@example.com。部分服务商要求发件地址属于已验证域名。",
@@ -374,6 +389,11 @@ EMAIL_I18N_RESOURCES = {
         "tls_verify": {
             "description": "Verify TLS certificate",
             "hint": "Enabled by default. Only disable it for self-signed certificates on self-hosted servers; it weakens security.",
+        },
+        "tls_max_version": {
+            "description": "Max TLS version",
+            "labels": ["Auto", "TLS 1.2", "TLS 1.3"],
+            "hint": "Auto by default (no cap). Only pin a maximum TLS version when a legacy server requires it, e.g. TLS 1.2 only. Unrelated to certificate verification.",
         },
         "from_addr": {
             "description": "From address",
@@ -626,6 +646,13 @@ class EmailPlatformAdapter(Platform):
             self.mailbox if self.mailbox.isascii() else _imap_mutf7_encode(self.mailbox)
         )
         self._mailbox_warned = False
+        self._imap_addresses: list | None = None
+        self._imap_last_good: tuple | None = None
+        self._imap_attempts: list = []
+        # Throttle repeated connection-failure logs: the first failure of a run
+        # is logged in full, later ones are downgraded to DEBUG until a poll
+        # succeeds again.
+        self._poll_error_logged = False
         self.poll_interval = max(1, int(platform_config.get("poll_interval") or 30))
 
         self.smtp_host = str(platform_config.get("smtp_host") or "")
@@ -645,10 +672,24 @@ class EmailPlatformAdapter(Platform):
         self.smtp_pass = str(platform_config.get("smtp_pass") or "")
         self.smtp_timeout = max(1, int(platform_config.get("smtp_timeout") or 30))
         self.tls_verify = bool(platform_config.get("tls_verify", True))
+        self.tls_max_version = (
+            str(platform_config.get("tls_max_version") or "auto").strip().lower()
+        )
+        if self.tls_max_version not in ("auto", "1.2", "1.3"):
+            logger.warning(
+                "[email:%s] 未知的 tls_max_version=%r，回退为 auto。",
+                self.instance_id,
+                self.tls_max_version,
+            )
+            self.tls_max_version = "auto"
         self._ssl_context = ssl.create_default_context()
         if not self.tls_verify:
             self._ssl_context.check_hostname = False
             self._ssl_context.verify_mode = ssl.CERT_NONE
+        if self.tls_max_version == "1.2":
+            self._ssl_context.maximum_version = ssl.TLSVersion.TLSv1_2
+        elif self.tls_max_version == "1.3":
+            self._ssl_context.maximum_version = ssl.TLSVersion.TLSv1_3
 
         self.from_addr = str(platform_config.get("from_addr") or self.imap_user)
         self.from_name = str(platform_config.get("from_name") or "")
@@ -761,13 +802,40 @@ class EmailPlatformAdapter(Platform):
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.error(
-                    "[email:%s] 轮询失败: %s: %s",
-                    self.instance_id,
-                    type(e).__name__,
-                    e,
-                    exc_info=True,
-                )
+                if self._poll_error_logged:
+                    logger.debug(
+                        "[email:%s] 轮询仍失败: %s: %s",
+                        self.instance_id,
+                        type(e).__name__,
+                        e,
+                    )
+                else:
+                    logger.error(
+                        "[email:%s] 轮询失败: %s: %s",
+                        self.instance_id,
+                        type(e).__name__,
+                        e,
+                        exc_info=True,
+                    )
+                    if self._imap_attempts:
+                        detail = "; ".join(
+                            f"{addr} -> {err}" for addr, err in self._imap_attempts
+                        )
+                        logger.warning(
+                            "[email:%s] IMAP 已尝试全部 %d 个地址：%s",
+                            self.instance_id,
+                            len(self._imap_attempts),
+                            detail,
+                        )
+                    elif isinstance(e, (ssl.SSLError, socket.gaierror)):
+                        logger.warning(
+                            "[email:%s] 所有解析地址均无法建立 TLS 连接（可能该服务器"
+                            "/网络到邮件服务商的某些后端不可达）；下轮会重新解析地址重试。",
+                            self.instance_id,
+                        )
+                    self._poll_error_logged = True
+            else:
+                self._poll_error_logged = False
             try:
                 await asyncio.wait_for(
                     self._shutdown_event.wait(),
@@ -1005,7 +1073,10 @@ class EmailPlatformAdapter(Platform):
         """Open a logged-in IMAP connection according to the configured security.
 
         Honors ``imap_security`` (SSL / STARTTLS / plaintext), ``imap_timeout``,
-        ``tls_verify`` and ``imap_send_id``.
+        ``tls_verify``, ``tls_max_version`` and ``imap_send_id``. Every address
+        returned by ``getaddrinfo`` is tried in turn, so a backend that accepts
+        the TCP connection but aborts the TLS handshake is skipped; the address
+        that worked is cached and preferred on the next call.
 
         Returns:
             A ready-to-use IMAP connection.
@@ -1013,21 +1084,83 @@ class EmailPlatformAdapter(Platform):
         Raises:
             Exception: Propagated from imaplib when connecting or logging in fails.
         """
-        if self.imap_security == "ssl":
-            connection = imaplib.IMAP4_SSL(
+        addresses = self._imap_addresses
+        if not addresses:
+            addresses = socket.getaddrinfo(
                 self.imap_host,
                 self.imap_port,
-                timeout=self.imap_timeout,
-                ssl_context=self._ssl_context,
+                proto=socket.IPPROTO_TCP,
             )
+            if self._imap_last_good is not None:
+                addresses = [
+                    self._imap_last_good,
+                    *[a for a in addresses if a != self._imap_last_good],
+                ]
+            self._imap_addresses = addresses
+            logger.debug(
+                "[email:%s] IMAP %s:%s 解析到 %d 个地址: %s",
+                self.instance_id,
+                self.imap_host,
+                self.imap_port,
+                len(addresses),
+                [a[4] for a in addresses],
+            )
+
+        try:
+            attempts: list[tuple[tuple, str]] = []
+            if self.imap_security == "ssl":
+                connection = _FailoverIMAP4SSL(
+                    self.imap_host,
+                    self.imap_port,
+                    ssl_context=self._ssl_context,
+                    timeout=self.imap_timeout,
+                    addresses=addresses,
+                    logger=logger,
+                    label=f"email:{self.instance_id}",
+                    attempts=attempts,
+                )
+            else:
+                connection = _FailoverIMAP4(
+                    self.imap_host,
+                    self.imap_port,
+                    timeout=self.imap_timeout,
+                    addresses=addresses,
+                    logger=logger,
+                    label=f"email:{self.instance_id}",
+                    attempts=attempts,
+                )
+                if self.imap_security == "starttls":
+                    connection.starttls(ssl_context=self._ssl_context)
+        except Exception:
+            # Drop the resolved list so the next call re-resolves and picks up
+            # rotated DNS records, and stop preferring the address that failed.
+            self._imap_addresses = None
+            self._imap_last_good = None
+            # The caller (run loop) reports the full attempt detail once.
+            self._imap_attempts = attempts
+            raise
         else:
-            connection = imaplib.IMAP4(
-                self.imap_host,
-                self.imap_port,
-                timeout=self.imap_timeout,
-            )
-            if self.imap_security == "starttls":
-                connection.starttls(ssl_context=self._ssl_context)
+            self._imap_attempts = []
+
+        connected = getattr(connection, "connected_address", None)
+        if connected is not None:
+            for entry in addresses:
+                if entry[4] == connected:
+                    self._imap_last_good = entry
+                    # Prefer the address that worked on subsequent calls.
+                    self._imap_addresses = [
+                        entry,
+                        *[a for a in addresses if a != entry],
+                    ]
+                    break
+            if addresses and connected != addresses[0][4]:
+                logger.info(
+                    "[email:%s] 首个地址 %s 不可用，已自动切换到 %s。",
+                    self.instance_id,
+                    addresses[0][4],
+                    connected,
+                )
+
         try:
             connection.login(self.imap_user, self.imap_pass)
             if self.imap_send_id:

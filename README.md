@@ -30,6 +30,7 @@ AstrBot Email 平台适配器（IMAP 收信 / SMTP 发信），支持多个 Bot 
 | `smtp_user` / `smtp_pass` | SMTP 账户与应用专用密码/API Key（每实例独立配置，也可多实例共享；留空且关闭认证时不登录 |
 | `smtp_timeout` | SMTP 连接与发送超时秒数，默认 30 |
 | `tls_verify` | 是否校验 TLS 证书，默认 `true`；仅在自建服务使用自签名证书时关闭 |
+| `tls_max_version` | 最高 TLS 版本：`auto`（默认，不限制）/ `1.2` / `1.3`。仅在老服务只兼容特定版本时手动限定；与证书校验无关 |
 | `from_addr` / `from_name` | 本实例发件地址与显示名，如 `bot1@example.com` |
 | `allowed_to` | 允许的收件人列表；**留空则允许所有收件人**，填写后仅处理命中地址的邮件，是多实例按地址路由的推荐方式 |
 | `block_from` | 拒收发件人黑名单；普通地址精确匹配，含正则元字符的条目（如 `.*@spam\.com`）按正则整串匹配（大小写不敏感），命中即拒收。留空不过滤 |
@@ -107,6 +108,8 @@ AstrBot Email 平台适配器（IMAP 收信 / SMTP 发信），支持多个 Bot 
 - 启动时（进入轮询前）连接服务器 `LIST` 文件夹，用配置的 `mailbox` 匹配可读名/原始名；命中则用其线上名收信，**未命中会 WARNING 并列出服务器可用文件夹**（最多 30 个），之后只记一次，不再每轮刷 error。
 - `mailbox` 支持直接填写可读名（中文等会自动进行 modified UTF-7 编码），也兼容已填写的原始编码名。
 - 每轮按 `imap_security`（SSL / STARTTLS / 明文）建立独立的 IMAP 连接，`UNSEEN` 搜索新邮件，处理后将邮件标记为 `\Seen`，连接用完即关；`imap_timeout` 防止连接挂死。
+- **多地址兜底收信**：大型服务商（如 QQ 邮箱）的 IMAP 域名会解析出多个后端地址，其中部分地址可能从你的网络不可达（TCP 能连上但 TLS 握手被重置，报 `SSL: RECORD_LAYER_FAILURE`）。插件会依次尝试**解析出的全部地址**，直到某个地址完成 TLS 握手，并**缓存可用地址**供后续轮询优先使用；某地址失效时会重新解析并切换。因此即使同一域名下有个别坏地址也不影响收信。
+- `tls_max_version` 控制 TLS 最高版本（IMAP 与 SMTP 共用同一 SSL 上下文），默认 `auto` 不限制。`tls_verify` 只影响证书校验，两者都不会改变上面的多地址兜底逻辑。
 - `imap_send_id` 开启时在登录后发送 IMAP `ID` 命令，兼容 163、Outlook 等要求该命令的服务商。
 - 按 `Message-ID` 去重，去重集合按实例隔离并有容量上限。
 - 正文优先取 `text/plain`，没有时从 `text/html` 提取纯文本。
@@ -117,6 +120,24 @@ AstrBot Email 平台适配器（IMAP 收信 / SMTP 发信），支持多个 Bot 
 - 每日限额分两级、按实例隔离：`daily_limit`（每个发件人）与 `daily_total_limit`（本实例总数，`0` 不限）。任一超限即**在收信阶段跳过该邮件**（不产生事件、不调用 LLM、不回复，仅 debug 日志）；计数在邮件**发送成功后**才消耗，发送失败不占用额度，并持久化到 `data/plugin_data/astrbot_plugin_email_adapter/email_limit_<id>.json`，跨日自动重置。
 - `silent_on_llm_error` 开启时，默认 LLM 请求失败**不回错误信息**（只记 debug 日志）；通过 `on_llm_request`/`on_llm_response` 钩子追踪请求生命周期，并结合核心的错误标记判断。
 - 每个实例独立协程与状态，单个实例异常只记日志，不影响其他实例。
+
+## 日志与排障
+
+- 把该插件的日志等级调到 `DEBUG`（WebUI 插件页），会打印每个地址的 TCP/TLS 尝试结果，便于定位。
+- 出现 `SSL: RECORD_LAYER_FAILURE` 等：某些后端地址握手失败，插件会自动切换；成功切换时会有一条 INFO：`首个地址 X 不可用，已自动切换到 Y`。
+- 出现 `IMAP 连接失败，已尝试全部 N 个地址：...`：所有解析地址都没连上，日志会逐条列出每个地址的错误原因（网络/服务端问题，或该域名全部后端不可达）。
+
+## 开发与测试
+
+```bash
+# 单元测试（纯标准库，无需 AstrBot）
+python -m unittest discover -s tests -p "test_*.py" -v
+
+# 常用邮件服务器连通性冒烟测试（仅 TCP + TLS 握手，不需要账号）
+python tests/smoke_mail_servers.py
+```
+
+CI（`.github/workflows/ci.yml`）会在每次 push/PR 运行单元测试，并每周定时对 Gmail、QQ、163、Outlook、iCloud 等常用 IMAP/SMTP 服务器做一次连通性探测。
 
 ## 许可证
 
