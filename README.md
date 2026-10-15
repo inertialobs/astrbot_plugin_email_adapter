@@ -105,10 +105,10 @@ AstrBot Email 平台适配器（IMAP 收信 / SMTP 发信），支持多个 Bot 
 
 ## 行为说明
 
-- 启动时（进入轮询前）连接服务器 `LIST` 文件夹，用配置的 `mailbox` 匹配可读名/原始名；命中则用其线上名收信，**未命中会 WARNING 并列出服务器可用文件夹**（最多 30 个），之后只记一次，不再每轮刷 error。
+- 启动时（进入轮询前）连接服务器 `LIST` 文件夹，用配置的 `mailbox` 匹配可读名/原始名；命中则用其线上名收信，未命中会 WARNING 并列出服务器可用文件夹（最多 30 个）。
 - `mailbox` 支持直接填写可读名（中文等会自动进行 modified UTF-7 编码），也兼容已填写的原始编码名。
 - 每轮按 `imap_security`（SSL / STARTTLS / 明文）建立独立的 IMAP 连接，`UNSEEN` 搜索新邮件，处理后将邮件标记为 `\Seen`，连接用完即关；`imap_timeout` 防止连接挂死。
-- **多地址兜底收信**：大型服务商（如 QQ 邮箱）的 IMAP 域名会解析出多个后端地址，其中部分地址可能从你的网络不可达（TCP 能连上但 TLS 握手被重置，报 `SSL: RECORD_LAYER_FAILURE`）。插件会依次尝试**解析出的全部地址**，直到某个地址完成 TLS 握手，并**缓存可用地址**供后续轮询优先使用；某地址失效时会重新解析并切换。因此即使同一域名下有个别坏地址也不影响收信。
+- 多地址兜底收信：大型服务商（如 QQ 邮箱）的 IMAP 域名会解析出多个后端地址，其中部分地址可能从你的网络不可达（TCP 能连上但 TLS 握手被重置，报 `SSL: RECORD_LAYER_FAILURE`）。插件会依次尝试解析出的全部地址，直到某个地址完成 TLS 握手，并缓存可用地址供后续轮询优先使用；某地址失效时会重新解析并切换。因此即使同一域名下有个别坏地址也不影响收信。
 - `tls_max_version` 控制 TLS 最高版本（IMAP 与 SMTP 共用同一 SSL 上下文），默认 `auto` 不限制。`tls_verify` 只影响证书校验，两者都不会改变上面的多地址兜底逻辑。
 - `imap_send_id` 开启时在登录后发送 IMAP `ID` 命令，兼容 163、Outlook 等要求该命令的服务商。
 - 按 `Message-ID` 去重，去重集合按实例隔离并有容量上限。
@@ -117,8 +117,8 @@ AstrBot Email 平台适配器（IMAP 收信 / SMTP 发信），支持多个 Bot 
 - 回复自动写入 `In-Reply-To` / `References` 头，在 Gmail、Outlook 等客户端中与原邮件归入同一会话。
 - 拒收：`block_from` 命中发件人即跳过（优先于收件人过滤），记 debug 日志；支持精确地址与正则（`re.fullmatch`，大小写不敏感）。
 - 收件人过滤：`allowed_to` 为空时不限制；否则匹配 `To` / `Delivered-To` / `X-Original-To`（大小写不敏感），不匹配的邮件忽略并记 debug 日志。
-- 每日限额分两级、按实例隔离：`daily_limit`（每个发件人）与 `daily_total_limit`（本实例总数，`0` 不限）。任一超限即**在收信阶段跳过该邮件**（不产生事件、不调用 LLM、不回复，仅 debug 日志）；计数在邮件**发送成功后**才消耗，发送失败不占用额度，并持久化到 `data/plugin_data/astrbot_plugin_email_adapter/email_limit_<id>.json`，跨日自动重置。
-- `silent_on_llm_error` 开启时，默认 LLM 请求失败**不回错误信息**（只记 debug 日志）；通过 `on_llm_request`/`on_llm_response` 钩子追踪请求生命周期，并结合核心的错误标记判断。
+- 每日限额分两级、按实例隔离：`daily_limit`（每个发件人）与 `daily_total_limit`（本实例总数，`0` 不限）。任一超限即在收信阶段跳过该邮件；计数在邮件发送成功后才消耗，发送失败不占用额度，并持久化到 `data/plugin_data/astrbot_plugin_email_adapter/email_limit_<id>.json`，跨日自动重置。
+- `silent_on_llm_error` 开启时，默认 LLM 请求失败不回错误信息；通过 `on_llm_request`/`on_llm_response` 钩子追踪请求生命周期，并结合核心的错误标记判断。
 - 每个实例独立协程与状态，单个实例异常只记日志，不影响其他实例。
 
 ## 日志与排障

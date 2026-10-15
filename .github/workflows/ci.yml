@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  schedule:
+    # Weekly reachability check for common mail providers.
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+jobs:
+  unit:
+    name: Unit tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run failover unit tests
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
+  mail-connectivity:
+    name: Mail server connectivity
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Probe common IMAP/SMTP servers
+        run: python tests/smoke_mail_servers.py --timeout 15
